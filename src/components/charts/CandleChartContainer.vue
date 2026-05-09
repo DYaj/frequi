@@ -10,6 +10,7 @@ const props = withDefaults(
     /** Reload data on pair switch if in historic view */
     reloadDataOnSwitch?: boolean;
     strategy?: string;
+    scannerMode?: string;
     sliderPosition?: ChartSliderPosition;
   }>(),
   {
@@ -17,6 +18,7 @@ const props = withDefaults(
     historicView: false,
     reloadDataOnSwitch: false,
     strategy: '',
+    scannerMode: 'off',
     sliderPosition: undefined,
   },
 );
@@ -217,6 +219,7 @@ const singlePairSelection = computed({
           :historic-view="botStore.activeBot.isWebserverMode"
           :timeframe="timeframe"
           :trades="props.trades"
+          :scanner-mode="props.scannerMode"
           :slider-position="props.sliderPosition"
           :is-single-pair-view="isSinglePairView"
           @refresh-data="refresh()"

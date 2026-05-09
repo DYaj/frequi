@@ -18,6 +18,32 @@ interface SetupPayload {
   source?: string;
 }
 
+interface ScannerAlert {
+  timestamp: string;
+  pair: string;
+  side: string | null;
+  scanner_stage: string;
+  context_status?: string | null;
+  context_reason?: string | null;
+  near_ready?: boolean;
+  fvg_entry_price?: number | null;
+  stop_price?: number | null;
+  target_price?: number | null;
+  rr?: number | null;
+}
+
+interface ScannerPayload {
+  ok: boolean;
+  scanner: string;
+  mode: string;
+  alerts: ScannerAlert[];
+  latest_alert: ScannerAlert | null;
+  counts: Record<string, number>;
+  rejection_breakdown?: Record<string, number>;
+  updated_at?: string;
+  error?: string;
+}
+
 const props = withDefaults(
   defineProps<{
     trades?: Trade[];
@@ -25,6 +51,7 @@ const props = withDefaults(
     timeframe: string;
     historicView?: boolean;
     pair?: string;
+    scannerMode?: string;
     sliderPosition?: ChartSliderPosition;
     isSinglePairView?: boolean;
   }>(),
@@ -32,6 +59,7 @@ const props = withDefaults(
     trades: () => [],
     historicView: false,
     pair: '',
+    scannerMode: 'off',
     sliderPosition: undefined,
     isSinglePairView: true,
   },
@@ -51,7 +79,10 @@ const setupsPayload = ref<SetupPayload>({
   rows: [],
   top_setup: null,
 });
+const scannerPayload = ref<ScannerPayload | null>(null);
+const scannerLoading = ref(false);
 let setupPollInterval: number | undefined;
+let scannerPollInterval: number | undefined;
 
 const dataset = computed((): PairHistory => {
   if (props.historicView) {
@@ -128,6 +159,17 @@ const currentPairSetup = computed(() => {
   return setupsPayload.value.rows.find((row) => row.pair === pair) ?? null;
 });
 
+const scannerEnabled = computed(() => props.scannerMode === 'v1_htf_ltf_sweep_fvg');
+const latestScannerAlert = computed(() => scannerPayload.value?.latest_alert ?? null);
+const latestScannerStage = computed(() => latestScannerAlert.value?.scanner_stage ?? 'Waiting');
+const scannerReadyCount = computed(() => scannerPayload.value?.counts?.SETUP_READY ?? 0);
+const scannerNearReadyCount = computed(() => {
+  const counts = scannerPayload.value?.counts ?? {};
+  return Object.entries(counts)
+    .filter(([stage]) => stage.startsWith('NEAR_READY_'))
+    .reduce((sum, [, value]) => sum + Number(value || 0), 0);
+});
+
 const datasetColumns = computed(() =>
   dataset.value ? (dataset.value.all_columns ?? dataset.value.columns) : [],
 );
@@ -195,6 +237,37 @@ async function fetchSetups() {
   }
 }
 
+async function fetchScanner() {
+  if (!scannerEnabled.value || !props.pair) {
+    scannerPayload.value = null;
+    return;
+  }
+
+  scannerLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      pair: props.pair,
+      limit: '30',
+    });
+    const res = await fetch(`${API_BASE}/api/v1/chart-scanner/v1-htf-ltf?${params}`);
+    if (!res.ok) throw new Error(`Scanner failed with ${res.status}`);
+    scannerPayload.value = await res.json();
+  } catch (error) {
+    scannerPayload.value = {
+      ok: false,
+      scanner: props.scannerMode,
+      mode: 'scanner_only',
+      alerts: [],
+      latest_alert: null,
+      counts: {},
+      error: error instanceof Error ? error.message : 'Scanner fetch failed',
+    };
+    console.error('SingleCandleChartContainer scanner fetch failed', error);
+  } finally {
+    scannerLoading.value = false;
+  }
+}
+
 function refresh() {
   emit('refreshData', props.pair, plotStore.usedColumns);
 }
@@ -242,14 +315,26 @@ watch(
   },
 );
 
+watch(
+  () => [props.pair, props.scannerMode],
+  () => {
+    fetchScanner();
+  },
+);
+
 onMounted(() => {
   fetchSetups();
+  fetchScanner();
   setupPollInterval = window.setInterval(fetchSetups, 3000);
+  scannerPollInterval = window.setInterval(fetchScanner, 15000);
 });
 
 onBeforeUnmount(() => {
   if (setupPollInterval) {
     window.clearInterval(setupPollInterval);
+  }
+  if (scannerPollInterval) {
+    window.clearInterval(scannerPollInterval);
   }
 });
 </script>
@@ -280,6 +365,35 @@ onBeforeUnmount(() => {
         <span v-if="currentPairSetup.result" :class="bannerResultClass(currentPairSetup.result)">
           {{ currentPairSetup.result }}
         </span>
+      </div>
+    </div>
+
+    <div
+      v-if="scannerEnabled"
+      class="scanner-banner mx-1 mb-2 rounded border px-3 py-2"
+      :class="{
+        ready: latestScannerAlert?.scanner_stage === 'SETUP_READY',
+        near: latestScannerAlert?.scanner_stage?.startsWith('NEAR_READY_'),
+        rejected: latestScannerAlert?.scanner_stage === 'CONTEXT_REJECTED',
+      }"
+    >
+      <div class="scanner-banner-top">
+        <span class="scanner-title">v1 HTF→LTF Scanner</span>
+        <span class="scanner-mode">scanner only</span>
+        <span v-if="scannerLoading" class="scanner-muted">refreshing</span>
+      </div>
+      <div v-if="scannerPayload?.ok" class="scanner-banner-body">
+        <span>{{ latestScannerStage }}</span>
+        <span v-if="latestScannerAlert?.side">{{ latestScannerAlert.side }}</span>
+        <span>Ready {{ scannerReadyCount }}</span>
+        <span>Near {{ scannerNearReadyCount }}</span>
+        <span v-if="latestScannerAlert?.context_reason">
+          {{ latestScannerAlert.context_reason }}
+        </span>
+        <span v-if="latestScannerAlert?.rr">RR {{ Number(latestScannerAlert.rr).toFixed(2) }}</span>
+      </div>
+      <div v-else class="scanner-banner-body scanner-error">
+        {{ scannerPayload?.error || 'Scanner waiting for data.' }}
       </div>
     </div>
 
@@ -356,3 +470,59 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.scanner-banner {
+  border-color: rgba(71, 85, 105, 0.8);
+  background: rgba(15, 23, 42, 0.92);
+  color: var(--p-surface-200);
+}
+
+.scanner-banner.ready {
+  border-color: rgba(34, 197, 94, 0.65);
+  background: rgba(20, 83, 45, 0.42);
+}
+
+.scanner-banner.near {
+  border-color: rgba(245, 158, 11, 0.65);
+  background: rgba(120, 53, 15, 0.38);
+}
+
+.scanner-banner.rejected {
+  border-color: rgba(148, 163, 184, 0.55);
+}
+
+.scanner-banner-top,
+.scanner-banner-body {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+}
+
+.scanner-title {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.scanner-mode,
+.scanner-muted {
+  color: var(--p-surface-400);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.scanner-banner-body {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.scanner-error {
+  color: #fca5a5;
+}
+</style>

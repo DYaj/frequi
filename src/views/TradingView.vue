@@ -3,6 +3,28 @@ const botStore = useBotStore();
 const chartStore = useChartConfigStore();
 const settingsStore = useSettingsStore();
 
+interface LiveStrategyOption {
+  value: string;
+  label: string;
+}
+
+interface LiveStrategyProfile {
+  research_profile: string;
+  label: string;
+  leverage?: number;
+  leverage_options?: number[];
+  observed_profile?: string | null;
+  observed_timeframe?: string | null;
+  available: LiveStrategyOption[];
+}
+
+interface ChartScannerOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
+const API_BASE = 'http://localhost:5001';
 const chartTimeframes = [
   '1s',
   '5s',
@@ -35,6 +57,41 @@ const runModeLabel = computed(() =>
   String(botStore.activeBot.botState?.runmode || 'Unknown').replaceAll('_', ' '),
 );
 const strategyLabel = computed(() => botStore.activeBot.strategy?.strategy || 'Strategy loading');
+const liveStrategyProfile = ref<LiveStrategyProfile | null>(null);
+const selectedLiveStrategy = ref('');
+const selectedLeverage = ref(4);
+const liveStrategyStatus = ref('');
+const isSavingLiveStrategy = ref(false);
+const isSavingLeverage = ref(false);
+let liveStrategyPollInterval: number | undefined;
+const chartScannerStorageKey = 'ftTradeChartScanner';
+const chartScannerOptions: ChartScannerOption[] = [
+  {
+    value: 'off',
+    label: 'Scanner off',
+    description: 'Chart scanner disabled.',
+  },
+  {
+    value: 'v1_htf_ltf_sweep_fvg',
+    label: 'v1 HTF→LTF Sweep FVG',
+    description: 'Scanner-only alerts. Does not place trades.',
+  },
+];
+const selectedChartScanner = ref('off');
+const selectedChartScannerLabel = computed(
+  () =>
+    chartScannerOptions.find((scanner) => scanner.value === selectedChartScanner.value)?.label ??
+    'Scanner off',
+);
+const liveStrategyLabel = computed(
+  () => liveStrategyProfile.value?.label || strategyLabel.value || 'Strategy loading',
+);
+const liveStrategyTimeframe = computed(
+  () => liveStrategyProfile.value?.observed_timeframe || botStore.activeBot.timeframe || '5m',
+);
+const chartTimeframeMismatch = computed(
+  () => !!liveStrategyTimeframe.value && chartTimeframe.value !== liveStrategyTimeframe.value,
+);
 const tradeChartHeightStorageKey = 'ftTradeChartHeight';
 const sidePanelStorageKey = 'ftTradeSidePanelOpen';
 const tradeChartHeight = ref(430);
@@ -52,6 +109,86 @@ function refreshOHLCV(pair: string, columns: string[]) {
     timeframe: chartTimeframe.value,
     columns: columns,
   });
+}
+
+async function fetchLiveStrategyProfile() {
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/live-strategy-profile`);
+    if (!res.ok) return;
+    const data = await res.json();
+    liveStrategyProfile.value = data;
+    if (!selectedLiveStrategy.value || selectedLiveStrategy.value !== data.research_profile) {
+      selectedLiveStrategy.value = data.research_profile;
+    }
+    if (Number.isFinite(Number(data.leverage))) {
+      selectedLeverage.value = Number(data.leverage);
+    }
+  } catch (error) {
+    console.error('Failed to fetch live strategy profile', error);
+  }
+}
+
+async function setLiveStrategyProfile(profile: string) {
+  if (!profile || profile === liveStrategyProfile.value?.research_profile) return;
+
+  isSavingLiveStrategy.value = true;
+  liveStrategyStatus.value = 'Applying...';
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/live-strategy-profile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ research_profile: profile }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `Failed with status ${res.status}`);
+    }
+    liveStrategyProfile.value = data;
+    selectedLiveStrategy.value = data.research_profile;
+    liveStrategyStatus.value = 'Applied';
+    window.setTimeout(() => {
+      if (liveStrategyStatus.value === 'Applied') liveStrategyStatus.value = '';
+    }, 2500);
+  } catch (error) {
+    liveStrategyStatus.value = error instanceof Error ? error.message : 'Apply failed';
+    selectedLiveStrategy.value = liveStrategyProfile.value?.research_profile || selectedLiveStrategy.value;
+  } finally {
+    isSavingLiveStrategy.value = false;
+  }
+}
+
+async function setLiveLeverage(leverage: number) {
+  const nextLeverage = Number(leverage);
+  if (!Number.isFinite(nextLeverage) || nextLeverage < 1) return;
+
+  isSavingLeverage.value = true;
+  liveStrategyStatus.value = 'Applying leverage...';
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/live-trade-controls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        research_profile: selectedLiveStrategy.value || liveStrategyProfile.value?.research_profile,
+        leverage: nextLeverage,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `Failed with status ${res.status}`);
+    }
+    liveStrategyProfile.value = data;
+    selectedLiveStrategy.value = data.research_profile;
+    selectedLeverage.value = Number(data.leverage);
+    liveStrategyStatus.value = `Leverage ${selectedLeverage.value}x`;
+    window.setTimeout(() => {
+      if (liveStrategyStatus.value === `Leverage ${selectedLeverage.value}x`) liveStrategyStatus.value = '';
+    }, 2500);
+  } catch (error) {
+    liveStrategyStatus.value = error instanceof Error ? error.message : 'Leverage apply failed';
+    selectedLeverage.value = Number(liveStrategyProfile.value?.leverage || selectedLeverage.value);
+  } finally {
+    isSavingLeverage.value = false;
+  }
 }
 
 function startTradeChartResize(event: PointerEvent) {
@@ -101,6 +238,8 @@ function syncViewportState() {
 onMounted(() => {
   syncViewportState();
   window.addEventListener('resize', syncViewportState);
+  fetchLiveStrategyProfile();
+  liveStrategyPollInterval = window.setInterval(fetchLiveStrategyProfile, 5000);
 
   const storedTradeChartHeight = Number(localStorage.getItem(tradeChartHeightStorageKey));
   if (Number.isFinite(storedTradeChartHeight) && storedTradeChartHeight > 0) {
@@ -108,6 +247,11 @@ onMounted(() => {
   }
 
   const storedSidePanelOpen = localStorage.getItem(sidePanelStorageKey);
+  const storedChartScanner = localStorage.getItem(chartScannerStorageKey);
+  if (storedChartScanner && chartScannerOptions.some((scanner) => scanner.value === storedChartScanner)) {
+    selectedChartScanner.value = storedChartScanner;
+  }
+
   if (isMobileViewport.value) {
     sidePanelOpen.value = false;
   } else if (storedSidePanelOpen !== null) {
@@ -117,11 +261,19 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', syncViewportState);
+  if (liveStrategyPollInterval) {
+    window.clearInterval(liveStrategyPollInterval);
+  }
 });
 
 function setSidePanelOpen(value: boolean) {
   sidePanelOpen.value = value;
   localStorage.setItem(sidePanelStorageKey, value ? '1' : '0');
+}
+
+function setChartScanner(scanner: string) {
+  selectedChartScanner.value = scanner;
+  localStorage.setItem(chartScannerStorageKey, scanner);
 }
 </script>
 
@@ -144,16 +296,75 @@ function setSidePanelOpen(value: boolean) {
         </div>
       </div>
       <div class="trade-command-side">
-        <div class="trade-strategy-label">{{ strategyLabel }}</div>
-        <button
-          type="button"
-          class="desk-action"
-          :aria-pressed="sidePanelOpen"
-          @click="setSidePanelOpen(!sidePanelOpen)"
-        >
-          <i-mdi-view-dashboard-outline />
-          <span>{{ sidePanelOpen ? 'Hide Panels' : 'Show Panels' }}</span>
-        </button>
+        <div class="trade-control-bar">
+          <label class="live-strategy-control strategy-select">
+            <span>Strategy</span>
+            <select
+              v-model="selectedLiveStrategy"
+              :disabled="isSavingLiveStrategy || !liveStrategyProfile?.available?.length"
+              @change="setLiveStrategyProfile(selectedLiveStrategy)"
+            >
+              <option
+                v-for="strategy in liveStrategyProfile?.available ?? []"
+                :key="strategy.value"
+                :value="strategy.value"
+              >
+                {{ strategy.label }}
+              </option>
+            </select>
+          </label>
+          <label class="live-strategy-control scanner-select">
+            <span>Scanner</span>
+            <select
+              v-model="selectedChartScanner"
+              @change="setChartScanner(selectedChartScanner)"
+            >
+              <option
+                v-for="scanner in chartScannerOptions"
+                :key="scanner.value"
+                :value="scanner.value"
+              >
+                {{ scanner.label }}
+              </option>
+            </select>
+          </label>
+          <label class="live-strategy-control leverage-select">
+            <span>Leverage</span>
+            <select
+              v-model.number="selectedLeverage"
+              :disabled="isSavingLeverage"
+              @change="setLiveLeverage(selectedLeverage)"
+            >
+              <option
+                v-for="leverage in liveStrategyProfile?.leverage_options ?? [1, 2, 3, 4, 5, 6, 8, 10]"
+                :key="leverage"
+                :value="leverage"
+              >
+                {{ leverage }}x
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="desk-action"
+            :aria-pressed="sidePanelOpen"
+            @click="setSidePanelOpen(!sidePanelOpen)"
+          >
+            <i-mdi-view-dashboard-outline />
+            <span>{{ sidePanelOpen ? 'Hide Panels' : 'Show Panels' }}</span>
+          </button>
+        </div>
+        <div class="trade-command-status">
+          <span class="trade-strategy-label">
+            Active: {{ liveStrategyLabel }}
+            <span v-if="liveStrategyStatus"> · {{ liveStrategyStatus }}</span>
+          </span>
+          <span class="trade-strategy-label">Leverage {{ selectedLeverage }}x</span>
+          <span class="trade-strategy-label">Scanner {{ selectedChartScannerLabel }}</span>
+        </div>
+        <div v-if="chartTimeframeMismatch" class="trade-timeframe-warning">
+          Chart {{ chartTimeframe }} · bot trades {{ liveStrategyTimeframe }}
+        </div>
       </div>
     </section>
 
@@ -319,6 +530,7 @@ function setSidePanelOpen(value: boolean) {
                 :historic-view="!!false"
                 :timeframe="chartTimeframe"
                 :trades="botStore.activeBot.allTrades"
+                :scanner-mode="selectedChartScanner"
                 @refresh-data="refreshOHLCV"
               />
             </div>
@@ -459,28 +671,93 @@ function setSidePanelOpen(value: boolean) {
 
 .trade-command-side {
   display: flex;
-  min-width: min(28rem, 42%);
+  min-width: min(46rem, 58%);
   flex-direction: column;
   align-items: flex-end;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   text-align: right;
+}
+
+.trade-control-bar {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(190px, 1.25fr) minmax(170px, 1fr) minmax(92px, 0.42fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.trade-command-status {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 12px;
 }
 
 .trade-strategy-label {
   max-width: 100%;
   overflow: hidden;
   color: var(--p-surface-400);
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.live-strategy-control {
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  gap: 4px;
+  color: var(--p-surface-400);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.live-strategy-control.leverage-select {
+  min-width: 92px;
+}
+
+.live-strategy-control select {
+  min-height: 34px;
+  max-width: 100%;
+  border: 1px solid rgba(71, 85, 105, 0.85);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: rgba(2, 6, 23, 0.72);
+  color: var(--p-surface-100);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.live-strategy-control select:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.trade-timeframe-warning {
+  max-width: 100%;
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-align: left;
 }
 
 .desk-action {
   display: inline-flex;
   min-height: 34px;
   align-items: center;
+  align-self: end;
   gap: 8px;
   border: 1px solid rgba(0, 137, 161, 0.52);
   border-radius: 8px;
@@ -490,11 +767,34 @@ function setSidePanelOpen(value: boolean) {
   font-size: 0.82rem;
   font-weight: 760;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .desk-action:hover {
   border-color: rgba(46, 224, 255, 0.72);
   background: rgba(0, 137, 161, 0.22);
+}
+
+@media (max-width: 1120px) {
+  .trade-command-center {
+    flex-direction: column;
+  }
+
+  .trade-command-side {
+    min-width: 0;
+    align-items: stretch;
+    text-align: left;
+  }
+
+  .trade-command-status {
+    justify-content: flex-start;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 980px) {
+  .trade-control-bar {
+    grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.8fr) minmax(92px, 0.36fr) auto;
+  }
 }
 
 .trade-workspace {
@@ -719,10 +1019,15 @@ function setSidePanelOpen(value: boolean) {
   .trade-command-main {
     flex-direction: column;
     align-items: flex-start;
+    gap: 8px;
   }
 
   .trade-command-meta {
+    width: 100%;
+    flex-wrap: nowrap;
     justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
 
   .trade-command-side {
@@ -732,7 +1037,42 @@ function setSidePanelOpen(value: boolean) {
     text-align: left;
   }
 
+  .trade-control-bar {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+
+  .live-strategy-control.strategy-select,
+  .live-strategy-control.scanner-select {
+    grid-column: auto;
+    flex: 0 0 230px;
+  }
+
+  .live-strategy-control.scanner-select {
+    flex-basis: 210px;
+  }
+
+  .live-strategy-control.leverage-select {
+    flex: 0 0 92px;
+  }
+
+  .trade-command-status {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 1px;
+    scrollbar-width: none;
+  }
+
+  .trade-command-status {
+    justify-content: flex-start;
+  }
+
   .desk-action {
+    flex: 0 0 auto;
     justify-content: center;
   }
 

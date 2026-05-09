@@ -55,6 +55,38 @@ function toggleExpanded(pair: string) {
   expandedPair.value = expandedPair.value === pair ? null : pair;
 }
 
+function isV18(row: SetupRow | null | undefined): boolean {
+  return row?.signal?.research_profile === 'v18_liquidity_sweep';
+}
+
+function selectedScore(row: SetupRow): number | string {
+  if (!row.signal) return row.progress_value ?? 'n/a';
+  return row.side === 'SHORT'
+    ? (row.signal.v18_score_short ?? 'n/a')
+    : (row.signal.v18_score_long ?? 'n/a');
+}
+
+function selectedThreshold(row: SetupRow): number | string {
+  if (!row.signal) return 'n/a';
+  return row.side === 'SHORT'
+    ? (row.signal.v18_short_score_threshold ?? 'n/a')
+    : (row.signal.v18_long_score_threshold ?? 'n/a');
+}
+
+function selectedReclaim(row: SetupRow): boolean {
+  if (!row.signal) return false;
+  return row.side === 'SHORT'
+    ? !!row.signal.v18_liquidity_sweep_reclaim_short
+    : !!row.signal.v18_liquidity_sweep_reclaim_long;
+}
+
+function selectedEntry(row: SetupRow): boolean {
+  if (!row.signal) return false;
+  return row.side === 'SHORT'
+    ? !!row.signal.v18_liquidity_short_entry
+    : !!row.signal.v18_liquidity_long_entry;
+}
+
 async function fetchSetups() {
   isLoading.value = true;
   fetchError.value = '';
@@ -114,7 +146,9 @@ onBeforeUnmount(() => {
       <div
         class="px-3 py-2 border-b border-surface-300 dark:border-surface-700 flex items-center justify-between"
       >
-        <div class="font-semibold">v15 Long/Short Readiness</div>
+        <div class="font-semibold">
+          {{ isV18(topSetup) ? 'v18 Liquidity Readiness' : 'Long/Short Readiness' }}
+        </div>
         <div class="text-xs text-surface-500 dark:text-surface-400">Click a row to expand</div>
       </div>
 
@@ -176,7 +210,65 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
 
-                  <div class="space-y-1" v-if="row.signal">
+                  <div class="space-y-1" v-if="row.signal && isV18(row)">
+                    <div>
+                      <span class="font-semibold">Model:</span>
+                      v18 Liquidity Sweep
+                    </div>
+                    <div>
+                      <span class="font-semibold">v18 Score:</span>
+                      {{ selectedScore(row) }} / {{ selectedThreshold(row) }}
+                    </div>
+                    <div>
+                      <span class="font-semibold">Session:</span>
+                      {{ row.signal.liquidity_session_active ? 'Active' : 'Inactive' }}
+                      <span v-if="row.signal.liquidity_session_core"> · Core</span>
+                      <span v-else-if="row.signal.liquidity_session_preopen"> · Pre-open</span>
+                    </div>
+                    <div>
+                      <span class="font-semibold">Sweep:</span>
+                      {{
+                        row.signal.sweep_low
+                          ? 'Low'
+                          : row.signal.sweep_high
+                            ? 'High'
+                            : row.signal.sweep
+                              ? 'Yes'
+                              : 'No'
+                      }}
+                    </div>
+                    <div>
+                      <span class="font-semibold">Reclaim Quality:</span>
+                      {{ selectedReclaim(row) ? 'OK' : 'Waiting' }}
+                    </div>
+                    <div>
+                      <span class="font-semibold">BPS / SPS:</span>
+                      {{ row.signal.bps?.toFixed?.(1) ?? row.signal.bps ?? 'n/a' }} /
+                      {{ row.signal.sps?.toFixed?.(1) ?? row.signal.sps ?? 'n/a' }}
+                    </div>
+                    <div>
+                      <span class="font-semibold">v18 Entry:</span>
+                      {{ selectedEntry(row) ? 'Ready' : 'No' }}
+                    </div>
+                    <div>
+                      <span class="font-semibold">Target Room:</span>
+                      {{
+                        row.side === 'SHORT'
+                          ? (row.signal.v18_short_liquidity_target_r?.toFixed?.(2) ??
+                            row.signal.v18_short_liquidity_target_r ??
+                            'n/a')
+                          : (row.signal.v18_long_liquidity_target_r?.toFixed?.(2) ??
+                            row.signal.v18_long_liquidity_target_r ??
+                            'n/a')
+                      }}R
+                    </div>
+                    <div>
+                      <span class="font-semibold">Risk Halt:</span>
+                      {{ row.signal.risk_halt_reason ?? 'none' }}
+                    </div>
+                  </div>
+
+                  <div class="space-y-1" v-else-if="row.signal">
                     <div>
                       <span class="font-semibold">Entry Gate:</span>
                       {{ row.signal.entry_gate ? 'Open' : 'Waiting' }}
